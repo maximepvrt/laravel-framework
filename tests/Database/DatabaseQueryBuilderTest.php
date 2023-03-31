@@ -4786,6 +4786,24 @@ SQL;
         ]), $result);
     }
 
+    public function testCursorPaginateWithExpressionOrderByRawThrowsException()
+    {
+        $builder = $this->getMockQueryBuilder();
+        $builder->from('foobar')->select('*')->orderByRaw('CONCAT(firstname, \' \', lastname)');
+        $builder->shouldReceive('newQuery')->andReturnUsing(function () use ($builder) {
+            return new Builder($builder->connection, $builder->grammar, $builder->processor);
+        });
+
+        $builder->shouldReceive('get')->once();
+
+        CursorPaginator::currentCursorResolver(function () {
+            return null;
+        });
+
+        $this->expectException(RuntimeException::class);
+        $builder->cursorPaginate();
+    }
+
     public function testCursorPaginateWithDynamicColumnWithCastInSelectRaw()
     {
         $perPage = 15;
