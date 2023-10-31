@@ -7,6 +7,7 @@ use Illuminate\Database\Query\Expression;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\Schema\ForeignIdColumnDefinition;
 use Illuminate\Database\Schema\Grammars\MySqlGrammar;
+use Illuminate\Tests\Database\Fixtures\Enums\Foo;
 use Mockery as m;
 use PHPUnit\Framework\TestCase;
 
@@ -497,6 +498,17 @@ class DatabaseMySqlSchemaGrammarTest extends TestCase
         ], $statements);
     }
 
+    public function testAddingForeignIdSpecifyingIndexNameInConstraint()
+    {
+        $blueprint = new Blueprint('users');
+        $blueprint->foreignId('company_id')->constrained(indexName: 'my_index');
+        $statements = $blueprint->toSql($this->getConnection(), $this->getGrammar());
+        $this->assertSame([
+            'alter table `users` add `company_id` bigint unsigned not null',
+            'alter table `users` add constraint `my_index` foreign key (`company_id`) references `companies` (`id`)',
+        ], $statements);
+    }
+
     public function testAddingBigIncrementingID()
     {
         $blueprint = new Blueprint('users');
@@ -612,6 +624,13 @@ class DatabaseMySqlSchemaGrammarTest extends TestCase
 
         $this->assertCount(1, $statements);
         $this->assertSame('alter table `users` add `foo` varchar(100) null default CURRENT TIMESTAMP', $statements[0]);
+
+        $blueprint = new Blueprint('users');
+        $blueprint->string('foo', 100)->nullable()->default(Foo::BAR);
+        $statements = $blueprint->toSql($this->getConnection(), $this->getGrammar());
+
+        $this->assertCount(1, $statements);
+        $this->assertSame('alter table `users` add `foo` varchar(100) null default \'bar\'', $statements[0]);
     }
 
     public function testAddingText()

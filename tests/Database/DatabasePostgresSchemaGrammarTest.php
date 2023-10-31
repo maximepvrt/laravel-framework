@@ -416,6 +416,17 @@ class DatabasePostgresSchemaGrammarTest extends TestCase
         ], $statements);
     }
 
+    public function testAddingForeignIdSpecifyingIndexNameInConstraint()
+    {
+        $blueprint = new Blueprint('users');
+        $blueprint->foreignId('company_id')->constrained(indexName: 'my_index');
+        $statements = $blueprint->toSql($this->getConnection(), $this->getGrammar());
+        $this->assertSame([
+            'alter table "users" add column "company_id" bigint not null',
+            'alter table "users" add constraint "my_index" foreign key ("company_id") references "companies" ("id")',
+        ], $statements);
+    }
+
     public function testAddingBigIncrementingID()
     {
         $blueprint = new Blueprint('users');
@@ -1175,11 +1186,11 @@ class DatabasePostgresSchemaGrammarTest extends TestCase
         $this->assertSame('select * from information_schema.tables where table_catalog = ? and table_schema = ? and table_name = ? and table_type = \'BASE TABLE\'', $statement);
     }
 
-    public function testCompileColumnListing()
+    public function testCompileColumns()
     {
-        $statement = $this->getGrammar()->compileColumnListing();
+        $statement = $this->getGrammar()->compileColumns('db', 'public', 'table');
 
-        $this->assertSame('select column_name from information_schema.columns where table_catalog = ? and table_schema = ? and table_name = ?', $statement);
+        $this->assertStringContainsString("where c.relname = 'table' and n.nspname = 'public'", $statement);
     }
 
     protected function getConnection()

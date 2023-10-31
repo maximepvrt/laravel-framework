@@ -23,6 +23,8 @@ use Illuminate\Database\Eloquent\Casts\AsEnumArrayObject;
 use Illuminate\Database\Eloquent\Casts\AsEnumCollection;
 use Illuminate\Database\Eloquent\Casts\AsStringable;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\Concerns\HasUlids;
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\JsonEncodingException;
 use Illuminate\Database\Eloquent\MassAssignmentException;
 use Illuminate\Database\Eloquent\MissingAttributeException;
@@ -45,9 +47,7 @@ use PHPUnit\Framework\TestCase;
 use ReflectionClass;
 use stdClass;
 
-if (PHP_VERSION_ID >= 80100) {
-    include 'Enums.php';
-}
+include_once 'Enums.php';
 
 class DatabaseEloquentModelTest extends TestCase
 {
@@ -203,6 +203,24 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertTrue($model->isDirty('ascollectionAttribute'));
     }
 
+    public function testDirtyOnCastedCustomCollection()
+    {
+        $model = new EloquentModelCastingStub;
+        $model->setRawAttributes([
+            'asCustomCollectionAttribute' => '{"foo": "bar"}',
+        ]);
+        $model->syncOriginal();
+
+        $this->assertInstanceOf(CustomCollection::class, $model->asCustomCollectionAttribute);
+        $this->assertFalse($model->isDirty('asCustomCollectionAttribute'));
+
+        $model->asCustomCollectionAttribute = ['foo' => 'bar'];
+        $this->assertFalse($model->isDirty('asCustomCollectionAttribute'));
+
+        $model->asCustomCollectionAttribute = ['foo' => 'baz'];
+        $this->assertTrue($model->isDirty('asCustomCollectionAttribute'));
+    }
+
     public function testDirtyOnCastedStringable()
     {
         $model = new EloquentModelCastingStub;
@@ -264,6 +282,49 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertTrue($model->isDirty('asEncryptedCollectionAttribute'));
     }
 
+    public function testDirtyOnCastedEncryptedCustomCollection()
+    {
+        $this->encrypter = m::mock(Encrypter::class);
+        Crypt::swap($this->encrypter);
+        Model::$encrypter = null;
+
+        $this->encrypter->expects('encryptString')
+            ->twice()
+            ->with('{"foo":"bar"}')
+            ->andReturn('encrypted-value');
+
+        $this->encrypter->expects('decryptString')
+            ->with('encrypted-value')
+            ->andReturn('{"foo": "bar"}');
+
+        $this->encrypter->expects('encryptString')
+            ->with('{"foo":"baz"}')
+            ->andReturn('new-encrypted-value');
+
+        $this->encrypter->expects('decrypt')
+            ->with('encrypted-value', false)
+            ->andReturn('{"foo": "bar"}');
+
+        $this->encrypter->expects('decrypt')
+            ->with('new-encrypted-value', false)
+            ->andReturn('{"foo":"baz"}');
+
+        $model = new EloquentModelCastingStub;
+        $model->setRawAttributes([
+            'asEncryptedCustomCollectionAttribute' => 'encrypted-value',
+        ]);
+        $model->syncOriginal();
+
+        $this->assertInstanceOf(CustomCollection::class, $model->asEncryptedCustomCollectionAttribute);
+        $this->assertFalse($model->isDirty('asEncryptedCustomCollectionAttribute'));
+
+        $model->asEncryptedCustomCollectionAttribute = ['foo' => 'bar'];
+        $this->assertFalse($model->isDirty('asEncryptedCustomCollectionAttribute'));
+
+        $model->asEncryptedCustomCollectionAttribute = ['foo' => 'baz'];
+        $this->assertTrue($model->isDirty('asEncryptedCustomCollectionAttribute'));
+    }
+
     public function testDirtyOnCastedEncryptedArrayObject()
     {
         $this->encrypter = m::mock(Encrypter::class);
@@ -307,9 +368,6 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertTrue($model->isDirty('asEncryptedArrayObjectAttribute'));
     }
 
-    /**
-     * @requires PHP >= 8.1
-     */
     public function testDirtyOnEnumCollectionObject()
     {
         $model = new EloquentModelCastingStub;
@@ -328,9 +386,6 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertTrue($model->isDirty('asEnumCollectionAttribute'));
     }
 
-    /**
-     * @requires PHP >= 8.1
-     */
     public function testDirtyOnEnumArrayObject()
     {
         $model = new EloquentModelCastingStub;
@@ -347,6 +402,12 @@ class DatabaseEloquentModelTest extends TestCase
 
         $model->asEnumArrayObjectAttribute = ['draft', 'done'];
         $this->assertTrue($model->isDirty('asEnumArrayObjectAttribute'));
+    }
+
+    public function testHasCastsOnEnumAttribute()
+    {
+        $model = new EloquentModelEnumCastingStub();
+        $this->assertTrue($model->hasCast('enumAttribute', StringStatus::class));
     }
 
     public function testCleanAttributes()
@@ -1098,7 +1159,6 @@ class DatabaseEloquentModelTest extends TestCase
 
         $class = new ReflectionClass($model);
         $method = $class->getMethod('getArrayableRelations');
-        $method->setAccessible(true);
 
         $model->setRelation('foo', ['bar']);
         $model->setRelation('bam', ['boom']);
@@ -1708,6 +1768,98 @@ class DatabaseEloquentModelTest extends TestCase
         $this->assertEquals(['bar'], $clone->foo);
     }
 
+    public function testCloneModelMakesAFreshCopyOfTheModelWhenModelHasUuidPrimaryKey()
+    {
+        $class = new EloquentPrimaryUuidModelStub();
+        $class->uuid = 'ccf55569-bc4a-4450-875f-b5cffb1b34ec';
+        $class->exists = true;
+        $class->first = 'taylor';
+        $class->last = 'otwell';
+        $class->created_at = $class->freshTimestamp();
+        $class->updated_at = $class->freshTimestamp();
+        $class->setRelation('foo', ['bar']);
+
+        $clone = $class->replicate();
+
+        $this->assertNull($clone->uuid);
+        $this->assertFalse($clone->exists);
+        $this->assertSame('taylor', $clone->first);
+        $this->assertSame('otwell', $clone->last);
+        $this->assertArrayNotHasKey('created_at', $clone->getAttributes());
+        $this->assertArrayNotHasKey('updated_at', $clone->getAttributes());
+        $this->assertEquals(['bar'], $clone->foo);
+    }
+
+    public function testCloneModelMakesAFreshCopyOfTheModelWhenModelHasUuid()
+    {
+        $class = new EloquentNonPrimaryUuidModelStub();
+        $class->id = 1;
+        $class->uuid = 'ccf55569-bc4a-4450-875f-b5cffb1b34ec';
+        $class->exists = true;
+        $class->first = 'taylor';
+        $class->last = 'otwell';
+        $class->created_at = $class->freshTimestamp();
+        $class->updated_at = $class->freshTimestamp();
+        $class->setRelation('foo', ['bar']);
+
+        $clone = $class->replicate();
+
+        $this->assertNull($clone->id);
+        $this->assertNull($clone->uuid);
+        $this->assertFalse($clone->exists);
+        $this->assertSame('taylor', $clone->first);
+        $this->assertSame('otwell', $clone->last);
+        $this->assertArrayNotHasKey('created_at', $clone->getAttributes());
+        $this->assertArrayNotHasKey('updated_at', $clone->getAttributes());
+        $this->assertEquals(['bar'], $clone->foo);
+    }
+
+    public function testCloneModelMakesAFreshCopyOfTheModelWhenModelHasUlidPrimaryKey()
+    {
+        $class = new EloquentPrimaryUlidModelStub();
+        $class->ulid = '01HBZ975D8606P6CV672KW1AP2';
+        $class->exists = true;
+        $class->first = 'taylor';
+        $class->last = 'otwell';
+        $class->created_at = $class->freshTimestamp();
+        $class->updated_at = $class->freshTimestamp();
+        $class->setRelation('foo', ['bar']);
+
+        $clone = $class->replicate();
+
+        $this->assertNull($clone->ulid);
+        $this->assertFalse($clone->exists);
+        $this->assertSame('taylor', $clone->first);
+        $this->assertSame('otwell', $clone->last);
+        $this->assertArrayNotHasKey('created_at', $clone->getAttributes());
+        $this->assertArrayNotHasKey('updated_at', $clone->getAttributes());
+        $this->assertEquals(['bar'], $clone->foo);
+    }
+
+    public function testCloneModelMakesAFreshCopyOfTheModelWhenModelHasUlid()
+    {
+        $class = new EloquentNonPrimaryUlidModelStub();
+        $class->id = 1;
+        $class->ulid = '01HBZ975D8606P6CV672KW1AP2';
+        $class->exists = true;
+        $class->first = 'taylor';
+        $class->last = 'otwell';
+        $class->created_at = $class->freshTimestamp();
+        $class->updated_at = $class->freshTimestamp();
+        $class->setRelation('foo', ['bar']);
+
+        $clone = $class->replicate();
+
+        $this->assertNull($clone->id);
+        $this->assertNull($clone->ulid);
+        $this->assertFalse($clone->exists);
+        $this->assertSame('taylor', $clone->first);
+        $this->assertSame('otwell', $clone->last);
+        $this->assertArrayNotHasKey('created_at', $clone->getAttributes());
+        $this->assertArrayNotHasKey('updated_at', $clone->getAttributes());
+        $this->assertEquals(['bar'], $clone->foo);
+    }
+
     public function testModelObserversCanBeAttachedToModels()
     {
         EloquentModelStub::setEventDispatcher($events = m::mock(Dispatcher::class));
@@ -1957,16 +2109,17 @@ class DatabaseEloquentModelTest extends TestCase
 
     public function testIncrementOnExistingModelCallsQueryAndSetsAttribute()
     {
-        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutRelationships]');
+        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutScopes]');
         $model->exists = true;
         $model->id = 1;
         $model->syncOriginalAttribute('id');
         $model->foo = 2;
 
-        $model->shouldReceive('newQueryWithoutRelationships')->andReturn($query = m::mock(stdClass::class));
+        $model->shouldReceive('newQueryWithoutScopes')->andReturn($query = m::mock(stdClass::class));
         $query->shouldReceive('where')->andReturn($query);
         $query->shouldReceive('increment');
 
+        // hmm
         $model->publicIncrement('foo', 1);
         $this->assertFalse($model->isDirty());
 
@@ -1978,13 +2131,13 @@ class DatabaseEloquentModelTest extends TestCase
 
     public function testIncrementQuietlyOnExistingModelCallsQueryAndSetsAttributeAndIsQuiet()
     {
-        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutRelationships]');
+        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutScopes]');
         $model->exists = true;
         $model->id = 1;
         $model->syncOriginalAttribute('id');
         $model->foo = 2;
 
-        $model->shouldReceive('newQueryWithoutRelationships')->andReturn($query = m::mock(stdClass::class));
+        $model->shouldReceive('newQueryWithoutScopes')->andReturn($query = m::mock(stdClass::class));
         $query->shouldReceive('where')->andReturn($query);
         $query->shouldReceive('increment');
 
@@ -2005,13 +2158,13 @@ class DatabaseEloquentModelTest extends TestCase
 
     public function testDecrementQuietlyOnExistingModelCallsQueryAndSetsAttributeAndIsQuiet()
     {
-        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutRelationships]');
+        $model = m::mock(EloquentModelStub::class.'[newQueryWithoutScopes]');
         $model->exists = true;
         $model->id = 1;
         $model->syncOriginalAttribute('id');
         $model->foo = 4;
 
-        $model->shouldReceive('newQueryWithoutRelationships')->andReturn($query = m::mock(stdClass::class));
+        $model->shouldReceive('newQueryWithoutScopes')->andReturn($query = m::mock(stdClass::class));
         $query->shouldReceive('where')->andReturn($query);
         $query->shouldReceive('decrement');
 
@@ -3035,8 +3188,10 @@ class EloquentModelCastingStub extends Model
         'timestampAttribute' => 'timestamp',
         'asarrayobjectAttribute' => AsArrayObject::class,
         'ascollectionAttribute' => AsCollection::class,
+        'asCustomCollectionAttribute' => AsCollection::class.':'.CustomCollection::class,
         'asStringableAttribute' => AsStringable::class,
         'asEncryptedCollectionAttribute' => AsEncryptedCollection::class,
+        'asEncryptedCustomCollectionAttribute' => AsEncryptedCollection::class.':'.CustomCollection::class,
         'asEncryptedArrayObjectAttribute' => AsEncryptedArrayObject::class,
         'asEnumCollectionAttribute' => AsEnumCollection::class.':'.StringStatus::class,
         'asEnumArrayObjectAttribute' => AsEnumArrayObject::class.':'.StringStatus::class,
@@ -3051,6 +3206,11 @@ class EloquentModelCastingStub extends Model
     {
         return $date->format('Y-m-d H:i:s');
     }
+}
+
+class EloquentModelEnumCastingStub extends Model
+{
+    protected $casts = ['enumAttribute' => StringStatus::class];
 }
 
 class EloquentModelDynamicHiddenStub extends Model
@@ -3092,6 +3252,62 @@ class EloquentDifferentConnectionModelStub extends EloquentModelStub
     public $connection = 'different_connection';
 }
 
+class EloquentPrimaryUuidModelStub extends EloquentModelStub
+{
+    use HasUuids;
+
+    public $incrementing = false;
+    protected $keyType = 'string';
+
+    public function getKeyName()
+    {
+        return 'uuid';
+    }
+}
+
+class EloquentNonPrimaryUuidModelStub extends EloquentModelStub
+{
+    use HasUuids;
+
+    public function getKeyName()
+    {
+        return 'id';
+    }
+
+    public function uniqueIds()
+    {
+        return ['uuid'];
+    }
+}
+
+class EloquentPrimaryUlidModelStub extends EloquentModelStub
+{
+    use HasUlids;
+
+    public $incrementing = false;
+    protected $keyType = 'string';
+
+    public function getKeyName()
+    {
+        return 'ulid';
+    }
+}
+
+class EloquentNonPrimaryUlidModelStub extends EloquentModelStub
+{
+    use HasUlids;
+
+    public function getKeyName()
+    {
+        return 'id';
+    }
+
+    public function uniqueIds()
+    {
+        return ['ulid'];
+    }
+}
+
 class EloquentModelSavingEventStub
 {
     //
@@ -3127,4 +3343,9 @@ class Uppercase implements CastsInboundAttributes
     {
         return is_string($value) ? strtoupper($value) : $value;
     }
+}
+
+class CustomCollection extends BaseCollection
+{
+    //
 }
